@@ -18,8 +18,9 @@ from scipy.spatial import cKDTree
 
 # TODO: optimise this performance-wise:
 def _bootstrap(
-    score_df: pd.DataFrame,
-    loss_fn: Callable[[pd.DataFrame], float],
+    real_values: np.ndarray,
+    generated_values: np.ndarray,
+    loss_fn: Callable[[np.ndarray, np.ndarray], float],
     n_bootstrap: int = 100,
     ci_alpha: float = 0.01,
     whole_data_loss: Optional[float] = None,
@@ -30,26 +31,17 @@ def _bootstrap(
     else:
         losses = []
 
-    # get all real data
-    real_idx = score_df.loc[score_df['type'] == 'real'].index
-    n_real = len(real_idx)
-    real_all = score_df.loc[real_idx]
-    # get all generated data
-    generated_idx = score_df.loc[score_df['type'] == 'generated'].index
-    n_gen = len(generated_idx)
-    gen_all = score_df.loc[generated_idx]
     # get indices for bootstrap samples
-    real_btstr_idcx = rng_np.integers(0, n_real, size=(n_bootstrap, n_real))
-    gen_btstr_idcx = rng_np.integers(0, n_gen, size=(n_bootstrap, n_gen))
-    # create individual samples
+    real_btstr_idcx = rng_np.integers(
+        0, len(real_values), size=(n_bootstrap, len(real_values))
+    )
+    gen_btstr_idcx = rng_np.integers(
+        0, len(generated_values), size=(n_bootstrap, len(generated_values))
+    )
     for i in range(n_bootstrap):
-        # draw bootstrap samples
-        real_sample = real_all.iloc[real_btstr_idcx[i]]
-        gen_sample = gen_all.iloc[gen_btstr_idcx[i]]
-        score_df_sampled = pd.concat([real_sample, gen_sample], axis=0)
-
-        # losses.append(loss_fn(real_sample.score, gen_sample.score))
-        losses.append(loss_fn(score_df_sampled))
+        losses.append(
+            loss_fn(real_values[real_btstr_idcx[i]], generated_values[gen_btstr_idcx[i]])
+        )
     losses = np.array(losses)
 
     # get the percentiles of the bootstrapped loss values
@@ -65,11 +57,8 @@ def wasserstein(
     ci_alpha: float = 0.01,
     rng_np: np.random.Generator = np.random.default_rng(12345),
 ):
-    def _wasserstein(score_df: pd.DataFrame):
-        # p, q = flatten(p), flatten(q)
-        p = score_df.loc[score_df['type'] == 'real', 'score']
-        q = score_df.loc[score_df['type'] == 'generated', 'score']
-        return stats.wasserstein_distance(p, q)
+    def _wasserstein(real_scores: np.ndarray, generated_scores: np.ndarray):
+        return stats.wasserstein_distance(real_scores, generated_scores)
 
     if ('generated' not in score_df['type'].values) or ('real' not in score_df['type'].values):
         if bootstrap_ci:
@@ -78,11 +67,23 @@ def wasserstein(
 
     score_df = score_df.copy()
     score_df.score = (score_df.score - score_df.score.mean()) / score_df.score.std()
+    real_scores = score_df.loc[score_df['type'] == 'real', 'score'].to_numpy()
+    generated_scores = score_df.loc[
+        score_df['type'] == 'generated', 'score'
+    ].to_numpy()
 
-    w = _wasserstein(score_df)
+    w = _wasserstein(real_scores, generated_scores)
 
     if bootstrap_ci:
-        ci, losses = _bootstrap(score_df, _wasserstein, n_bootstrap, ci_alpha, w, rng_np)
+        ci, losses = _bootstrap(
+            real_scores,
+            generated_scores,
+            _wasserstein,
+            n_bootstrap,
+            ci_alpha,
+            w,
+            rng_np,
+        )
         return w, ci, losses
     else:
         return w
@@ -112,6 +113,17 @@ def l1_by_group(
         group_counts /= group_counts.sum(axis=0)
         return (group_counts.score_x - group_counts.score_y).abs().sum() / 2.
 
+    def _calc_l1_samples(
+        real_groups: np.ndarray, generated_groups: np.ndarray
+    ) -> float:
+        real_counts = np.bincount(real_groups, minlength=n_groups).astype(float)
+        generated_counts = np.bincount(
+            generated_groups, minlength=n_groups
+        ).astype(float)
+        real_counts /= real_counts.sum()
+        generated_counts /= generated_counts.sum()
+        return np.abs(real_counts - generated_counts).sum() / 2.
+
     if ('generated' not in score_df['type'].values) or ('real' not in score_df['type'].values):
         if bootstrap_ci:
             return 1, np.ones(2), np.ones(n_bootstrap+1)
@@ -120,7 +132,23 @@ def l1_by_group(
     l1 = _calc_l1(score_df)
 
     if bootstrap_ci:
-        l1_ci, l1s = _bootstrap(score_df, _calc_l1, n_bootstrap, ci_alpha, l1, rng_np)
+        real_groups = score_df.loc[score_df['type'] == 'real', 'group'].to_numpy()
+        generated_groups = score_df.loc[
+            score_df['type'] == 'generated', 'group'
+        ].to_numpy()
+        groups = np.union1d(real_groups, generated_groups)
+        n_groups = len(groups)
+        real_group_codes = np.searchsorted(groups, real_groups)
+        generated_group_codes = np.searchsorted(groups, generated_groups)
+        l1_ci, l1s = _bootstrap(
+            real_group_codes,
+            generated_group_codes,
+            _calc_l1_samples,
+            n_bootstrap,
+            ci_alpha,
+            l1,
+            rng_np,
+        )
         return l1, l1_ci, l1s
     else:
         return l1
