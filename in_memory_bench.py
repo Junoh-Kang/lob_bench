@@ -33,6 +33,18 @@ class InMemorySequence:
     m_cond: pd.DataFrame
     b_cond: pd.DataFrame
 
+    @property
+    def num_gen_series(self) -> tuple[int, ...]:
+        return (len(self.m_gen),)
+
+    @property
+    def _m_cond(self):
+        return lambda: self.m_cond
+
+    @property
+    def _b_cond(self):
+        return lambda: self.b_cond
+
     def materialize(self) -> None:
         """Keep the file-loader protocol while frames are already in memory."""
 

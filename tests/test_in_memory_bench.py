@@ -13,6 +13,8 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import in_memory_bench
 import data_loading
+import partitioning
+import run_bench
 
 
 def _messages(offset=0):
@@ -104,6 +106,29 @@ class InMemoryBenchTest(unittest.TestCase):
         self.assertEqual(loader[0].b_real.shape, (2, 40))
         self.assertEqual(loader[0].m_cond.shape, (2, 6))
 
+    def test_loader_supports_divergence_subsequence_partitioning(self):
+        loader = in_memory_bench.loader_from_payload(_payload(_entry(1, 0)))
+
+        subsequences = partitioning.get_subseqs(loader[0], subseq_len=1)
+
+        self.assertEqual(len(subsequences.m_gen[0]), 2)
+        pd.testing.assert_frame_equal(subsequences.m_cond, loader[0].m_cond)
+        pd.testing.assert_frame_equal(subsequences.b_cond, loader[0].b_cond)
+
+    def test_default_configs_share_repeated_feature_functions(self):
+        assert (
+            run_bench.DEFAULT_SCORING_CONFIG["spread"]["fn"]
+            is run_bench.DEFAULT_SCORING_CONFIG_COND["ask_volume | spread"]["cond"]["fn"]
+        )
+        assert (
+            run_bench.DEFAULT_SCORING_CONFIG["spread"]["fn"]
+            is run_bench.DEFAULT_SCORING_CONFIG_COND["spread | time"]["eval"]["fn"]
+        )
+        assert (
+            run_bench.DEFAULT_SCORING_CONFIG["ask_volume_touch"]["fn"]
+            is run_bench.DEFAULT_SCORING_CONFIG_COND["ask_volume | spread"]["eval"]["fn"]
+        )
+
     def test_run_payload_reuses_one_loader_for_both_metric_families(self):
         observed = {}
         original_run = in_memory_bench.run_bench.run_benchmark_for_loader
@@ -171,6 +196,8 @@ class InMemoryBenchTest(unittest.TestCase):
 
         self.assertEqual(sequence.materialized, 1)
         self.assertEqual(len(calls), 3)
+        self.assertIs(calls[0][1]["score_cache"], calls[1][1]["score_cache"])
+        self.assertIs(calls[1][1]["score_cache"], calls[2][1]["score_cache"])
         self.assertTrue(calls[2][1]["divergence"])
         self.assertEqual(calls[2][1]["divergence_horizon"], 100)
         self.assertEqual(len(score_files), 3)

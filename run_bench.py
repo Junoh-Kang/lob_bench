@@ -16,6 +16,15 @@ import metrics
 
 import time
 
+
+def _spread_score(messages, book):
+    return eval.spread(messages, book).values
+
+
+def _ask_volume_touch_score(messages, book):
+    return eval.l1_volume(messages, book).ask_vol.values
+
+
 ###################### UNCONDITIONAL SCORING ########################
 DEFAULT_METRICS = {
     'l1': metrics.l1_by_group,
@@ -25,7 +34,7 @@ DEFAULT_METRICS = {
 
 DEFAULT_SCORING_CONFIG = {
     "spread": {
-        "fn": lambda m, b: eval.spread(m, b).values,
+        "fn": _spread_score,
         "discrete": True,
     },
     "orderbook_imbalance": {
@@ -50,7 +59,7 @@ DEFAULT_SCORING_CONFIG = {
 
     # VOLUMES:
     "ask_volume_touch": {
-        "fn": lambda m, b: eval.l1_volume(m, b).ask_vol.values,
+        "fn": _ask_volume_touch_score,
     },
     "bid_volume_touch": {
         "fn": lambda m, b: eval.l1_volume(m, b).bid_vol.values,
@@ -119,16 +128,16 @@ DEFAULT_SCORING_CONFIG = {
 DEFAULT_SCORING_CONFIG_COND = {
     "ask_volume | spread": {
         "eval": {
-            "fn": lambda m, b: eval.l1_volume(m, b).ask_vol.values,
+            "fn": _ask_volume_touch_score,
         },
         "cond": {
-            "fn": lambda m, b: eval.spread(m, b).values,
+            "fn": _spread_score,
             "discrete": True,
         }
     },
     "spread | time": {
         "eval": {
-            "fn": lambda m, b: eval.spread(m, b).values,
+            "fn": _spread_score,
         },
         "cond": {
             "fn": lambda m, b: eval.time_of_day(m).values,
@@ -138,7 +147,7 @@ DEFAULT_SCORING_CONFIG_COND = {
     },
     "spread | volatility": {
         "eval": {
-            "fn": lambda m, b: eval.spread(m, b).values,
+            "fn": _spread_score,
             "discrete": True,
         },
         "cond": {
@@ -191,6 +200,7 @@ def run_benchmark_for_loader(
     # materialize all sequences, so we keep them in memory for multiple accesses
     for s in loader:
         s.materialize()
+    score_cache = scoring.ScoreCache(loader)
 
     time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     scores_ = None
@@ -200,6 +210,7 @@ def run_benchmark_for_loader(
             loader,
             scoring_config,
             default_metric=metric_config,
+            score_cache=score_cache,
         )
         print("[*] Saving results...")
         save_results(
@@ -216,6 +227,7 @@ def run_benchmark_for_loader(
             loader,
             scoring_config_cond,
             default_metric=metric_config,
+            score_cache=score_cache,
         )
         print("[*] Saving results...")
         save_results(
@@ -234,6 +246,7 @@ def run_benchmark_for_loader(
             metrics.l1_by_group,
             divergence_horizon=divergence_horizon,
             divergence=True,
+            score_cache=score_cache,
         )
         print("[*] Saving results...")
         save_results(

@@ -7,6 +7,50 @@ import partitioning
 import data_loading
 
 
+class ScoreCache:
+    """Reuse raw sequence scores while each mode keeps its own metric logic."""
+
+    def __init__(self, loader: data_loading.Simple_Loader) -> None:
+        self.loader = loader
+        self._real_scores = {}
+        self._generated_scores = {}
+        self._subsequences = {}
+        self._horizon_generated_scores = {}
+
+    def score_real(self, scoring_fn):
+        if scoring_fn not in self._real_scores:
+            self._real_scores[scoring_fn] = partitioning.score_real(
+                self.loader, scoring_fn
+            )
+        return self._real_scores[scoring_fn]
+
+    def score_generated(self, scoring_fn):
+        if scoring_fn not in self._generated_scores:
+            self._generated_scores[scoring_fn] = partitioning.score_gen(
+                self.loader, scoring_fn
+            )
+        return self._generated_scores[scoring_fn]
+
+    def score_real_gen(self, scoring_fn):
+        return self.score_real(scoring_fn), self.score_generated(scoring_fn)
+
+    def subsequences(self, horizon_length: int):
+        if horizon_length not in self._subsequences:
+            self._subsequences[horizon_length] = tuple(
+                partitioning.get_subseqs(sequence, subseq_len=horizon_length)
+                for sequence in self.loader
+            )
+        return self._subsequences[horizon_length]
+
+    def generated_horizon_scores(self, scoring_fn, horizon_length: int):
+        key = (scoring_fn, horizon_length)
+        if key not in self._horizon_generated_scores:
+            self._horizon_generated_scores[key] = partitioning.score_gen(
+                self.subsequences(horizon_length), scoring_fn
+            )
+        return self._horizon_generated_scores[key]
+
+
 def get_kwargs(score_config, conditional=False):
     kwargs = {
         "discrete": score_config.get("discrete", False),
@@ -41,11 +85,15 @@ def score_data(
     *,
     group_scores: bool = True,
     return_plot_fn=False,
+    score_cache: ScoreCache | None = None,
     **kwargs,
 ):
     """
     """
-    scores_real, scores_gen = partitioning.score_real_gen(loader, scoring_fn)
+    if score_cache is None:
+        scores_real, scores_gen = partitioning.score_real_gen(loader, scoring_fn)
+    else:
+        scores_real, scores_gen = score_cache.score_real_gen(scoring_fn)
 
     if group_scores:
         groups_real, groups_gen, thresholds = partitioning.group_by_score(
@@ -81,6 +129,7 @@ def score_data_cond(
     return_plot_fn: bool = False,
     score_kwargs: dict = {},
     score_cond_kwargs: dict = {},
+    score_cache: ScoreCache | None = None,
 ):
     """
     Grouping is done based on the scoring_fn_cond
@@ -91,7 +140,10 @@ def score_data_cond(
     where the binning is done based on the scoring_fn and score_kwargs.
     """
     # calc scores to be conditioned on
-    scores_real, scores_gen = partitioning.score_real_gen(loader, scoring_fn_cond)
+    if score_cache is None:
+        scores_real, scores_gen = partitioning.score_real_gen(loader, scoring_fn_cond)
+    else:
+        scores_real, scores_gen = score_cache.score_real_gen(scoring_fn_cond)
     groups_real, groups_gen, thresholds = partitioning.group_by_score(
         scores_real, scores_gen,
         return_thresholds=True,
@@ -102,7 +154,10 @@ def score_data_cond(
     # print('thresholds', thresholds)
 
     # calc scores of interest (to be conditioned on prior scores)
-    eval_real, eval_gen = partitioning.score_real_gen(loader, scoring_fn)
+    if score_cache is None:
+        eval_real, eval_gen = partitioning.score_real_gen(loader, scoring_fn)
+    else:
+        eval_real, eval_gen = score_cache.score_real_gen(scoring_fn)
     score_df = partitioning.get_score_table(eval_real, eval_gen, groups_real, groups_gen)
 
     score_df_cond = partitioning.get_score_table(scores_real, scores_gen, groups_real, groups_gen)
@@ -146,19 +201,28 @@ def score_prediction_horizons(
     scoring_fn: Callable[[pd.DataFrame, pd.DataFrame], float],
     horizon_length: int,
     group_scores: bool = True,
+    score_cache: ScoreCache | None = None,
     **kwargs
 ):
     """
     Computes a table unconditional scores of all real data with
     """
     # unconditional scoring of all real data
-    scores_real = partitioning.score_real(loader, scoring_fn)
+    if score_cache is None:
+        scores_real = partitioning.score_real(loader, scoring_fn)
+    else:
+        scores_real = score_cache.score_real(scoring_fn)
     # score_df_real = partitioning.get_score_table(scores_real, None, None, None)
 
     # split generated data into subsequences based on generation horizon
-    subseqs = tuple(partitioning.get_subseqs(s, subseq_len=horizon_length) for s in loader)
-    # score the generated subsequences
-    scores_gen = partitioning.score_gen(subseqs, scoring_fn)
+    if score_cache is None:
+        subseqs = tuple(
+            partitioning.get_subseqs(s, subseq_len=horizon_length) for s in loader
+        )
+        scores_gen = partitioning.score_gen(subseqs, scoring_fn)
+    else:
+        subseqs = score_cache.subsequences(horizon_length)
+        scores_gen = score_cache.generated_horizon_scores(scoring_fn, horizon_length)
     # enumerate the subsequences (===prediction horizon)
     _, groups_gen = partitioning.group_by_subseq(subseqs)
     score_df_gen = partitioning.get_score_table(
@@ -204,11 +268,17 @@ def compute_metrics(
                     ] = None,
     score_kwargs: dict = {},
     score_cond_kwargs: dict = {},
+    score_cache: ScoreCache | None = None,
 ) -> tuple[float, pd.DataFrame, Callable]:
     # unconditional scoring
     if scoring_fn_cond is None:
         score_df, plot_fn = score_data(
-            loader, scoring_fn, return_plot_fn=True, **score_kwargs)
+            loader,
+            scoring_fn,
+            return_plot_fn=True,
+            score_cache=score_cache,
+            **score_kwargs,
+        )
         metric = {m_name: m(score_df) for m_name, m in metric_fn.items()}
 
     # conditional scoring
@@ -216,7 +286,8 @@ def compute_metrics(
         score_df, plot_fn = score_data_cond(
             loader, scoring_fn, scoring_fn_cond,
             return_plot_fn=True, score_kwargs=score_kwargs,
-            score_cond_kwargs=score_cond_kwargs
+            score_cond_kwargs=score_cond_kwargs,
+            score_cache=score_cache,
         )
 
         # calc. loss for each of the conditional distributions
@@ -296,6 +367,7 @@ def compute_divergence_metrics(
         metric_fn: Union[Callable[[pd.DataFrame], float] , \
                    Iterable[Callable[[pd.DataFrame], float]]],
         horizon_length: int,
+        score_cache: ScoreCache | None = None,
         **kwargs,
     ):
     """
@@ -304,6 +376,7 @@ def compute_divergence_metrics(
         loader,
         scoring_fn,
         horizon_length,
+        score_cache=score_cache,
         # quantiles=[0.25, 0.5, 0.75],
         **kwargs,
     )
@@ -327,6 +400,7 @@ def run_benchmark(
     default_metric: Callable[[pd.DataFrame], float],
     divergence: bool = False,
     divergence_horizon: int = 50,
+    score_cache: ScoreCache | None = None,
 ) -> tuple[
     dict[str, float],
     dict[str, pd.DataFrame],
@@ -363,6 +437,7 @@ def run_benchmark(
                     score_config["fn"],
                     metric_fns,
                     divergence_horizon,
+                    score_cache=score_cache,
                     **get_kwargs(score_config)
                 )
 
@@ -375,6 +450,7 @@ def run_benchmark(
                     score_fn_cond,
                     score_kwargs=score_kwargs,
                     score_cond_kwargs=score_cond_kwargs,
+                    score_cache=score_cache,
                 )
 
     return scores, score_dfs, plot_fns
