@@ -120,6 +120,9 @@ def l1_by_group(
         generated_counts = np.bincount(
             generated_groups, minlength=n_groups
         ).astype(float)
+        used_groups = (real_counts != 0) | (generated_counts != 0)
+        real_counts = real_counts[used_groups]
+        generated_counts = generated_counts[used_groups]
         real_counts /= real_counts.sum()
         generated_counts /= generated_counts.sum()
         return np.abs(real_counts - generated_counts).sum() / 2.

@@ -100,6 +100,25 @@ class MetricsBootstrapTest(unittest.TestCase):
         np.testing.assert_array_equal(actual[1], expected[1])
         np.testing.assert_array_equal(actual[2], expected[2])
 
+    def test_l1_bootstrap_omits_bins_absent_from_a_resample(self):
+        score_df = pd.DataFrame(
+            {
+                "type": ["real"] * 17 + ["generated"] * 17,
+                "score": [1.0] * 34,
+                "group": list(range(17)) * 2,
+            }
+        )
+        expected = _reference_l1_by_group(
+            score_df, n_bootstrap=1, rng=np.random.default_rng(0)
+        )
+        actual = metrics.l1_by_group(
+            score_df, n_bootstrap=1, rng_np=np.random.default_rng(0)
+        )
+
+        self.assertEqual(actual[0], expected[0])
+        np.testing.assert_array_equal(actual[1], expected[1])
+        np.testing.assert_array_equal(actual[2], expected[2])
+
 
 if __name__ == "__main__":
     unittest.main()
