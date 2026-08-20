@@ -25,11 +25,15 @@ def _score_frame():
 
 def _reference_bootstrap(score_df, loss_fn, n_bootstrap, ci_alpha, whole_data_loss, rng):
     losses = [whole_data_loss]
-    real = score_df.loc[score_df["type"] == "real"]
-    generated = score_df.loc[score_df["type"] == "generated"]
-    real_indices = rng.integers(0, len(real), size=(n_bootstrap, len(real)))
+    real_indices = score_df.loc[score_df["type"] == "real"].index
+    generated_indices = score_df.loc[score_df["type"] == "generated"].index
+    n_real = len(real_indices)
+    n_generated = len(generated_indices)
+    real = score_df.loc[real_indices]
+    generated = score_df.loc[generated_indices]
+    real_indices = rng.integers(0, n_real, size=(n_bootstrap, n_real))
     generated_indices = rng.integers(
-        0, len(generated), size=(n_bootstrap, len(generated))
+        0, n_generated, size=(n_bootstrap, n_generated)
     )
     for real_index, generated_index in zip(real_indices, generated_indices):
         sample = pd.concat(
@@ -113,6 +117,65 @@ class MetricsBootstrapTest(unittest.TestCase):
         )
         actual = metrics.l1_by_group(
             score_df, n_bootstrap=1, rng_np=np.random.default_rng(0)
+        )
+
+        self.assertEqual(actual[0], expected[0])
+        np.testing.assert_array_equal(actual[1], expected[1])
+        np.testing.assert_array_equal(actual[2], expected[2])
+
+    def test_l1_bootstrap_preserves_duplicate_index_resampling(self):
+        score_df = pd.DataFrame(
+            {
+                "type": ["real"] * 3 + ["generated"] * 3,
+                "score": [1.0] * 6,
+                "group": [0, 1, 2, 0, 2, 3],
+            },
+            index=[0, 0, 1, 2, 2, 3],
+        )
+        expected = _reference_l1_by_group(
+            score_df, n_bootstrap=3, rng=np.random.default_rng(0)
+        )
+        actual = metrics.l1_by_group(
+            score_df, n_bootstrap=3, rng_np=np.random.default_rng(0)
+        )
+
+        self.assertEqual(actual[0], expected[0])
+        np.testing.assert_array_equal(actual[1], expected[1])
+        np.testing.assert_array_equal(actual[2], expected[2])
+
+    def test_wasserstein_bootstrap_preserves_duplicate_index_resampling(self):
+        score_df = pd.DataFrame(
+            {
+                "type": ["real"] * 3 + ["generated"] * 3,
+                "score": [1.0, 2.0, 4.0, 1.5, 3.0, 5.0],
+                "group": [0, 1, 2, 0, 2, 3],
+            },
+            index=[0, 0, 1, 2, 2, 3],
+        )
+        expected = _reference_wasserstein(
+            score_df, n_bootstrap=3, rng=np.random.default_rng(0)
+        )
+        actual = metrics.wasserstein(
+            score_df, n_bootstrap=3, rng_np=np.random.default_rng(0)
+        )
+
+        self.assertEqual(actual[0], expected[0])
+        np.testing.assert_array_equal(actual[1], expected[1])
+        np.testing.assert_array_equal(actual[2], expected[2])
+
+    def test_l1_bootstrap_uses_score_count_not_row_count(self):
+        score_df = pd.DataFrame(
+            {
+                "type": ["real", "real", "generated", "generated"],
+                "score": [1.0, np.nan, 1.0, 1.0],
+                "group": [0, 1, 0, 1],
+            }
+        )
+        expected = _reference_l1_by_group(
+            score_df, n_bootstrap=3, rng=np.random.default_rng(4)
+        )
+        actual = metrics.l1_by_group(
+            score_df, n_bootstrap=3, rng_np=np.random.default_rng(4)
         )
 
         self.assertEqual(actual[0], expected[0])

@@ -50,6 +50,25 @@ def _bootstrap(
 
     return ci, losses
 
+
+def _legacy_bootstrap_pools(
+    score_df: pd.DataFrame, value_column: str, *, include_score_valid: bool = False
+) -> tuple[np.ndarray, np.ndarray]:
+    """Materialize the exact row pools used by the former DataFrame bootstrap."""
+    def _pool(indices: pd.Index) -> np.ndarray:
+        rows = score_df.loc[indices].iloc[:len(indices)]
+        columns = [
+            rows[value_column].to_numpy(),
+            rows["type"].to_numpy() == "real",
+        ]
+        if include_score_valid:
+            columns.append(rows["score"].notna().to_numpy())
+        return np.column_stack(columns)
+
+    real_indices = score_df.loc[score_df["type"] == "real"].index
+    generated_indices = score_df.loc[score_df["type"] == "generated"].index
+    return _pool(real_indices), _pool(generated_indices)
+
 def wasserstein(
     score_df: pd.DataFrame,
     bootstrap_ci: bool = True,
@@ -59,6 +78,14 @@ def wasserstein(
 ):
     def _wasserstein(real_scores: np.ndarray, generated_scores: np.ndarray):
         return stats.wasserstein_distance(real_scores, generated_scores)
+
+    def _bootstrap_wasserstein(
+        real_rows: np.ndarray, generated_rows: np.ndarray
+    ) -> float:
+        rows = np.concatenate((real_rows, generated_rows), axis=0)
+        real_scores = rows[rows[:, 1] == 1, 0]
+        generated_scores = rows[rows[:, 1] == 0, 0]
+        return _wasserstein(real_scores, generated_scores)
 
     if ('generated' not in score_df['type'].values) or ('real' not in score_df['type'].values):
         if bootstrap_ci:
@@ -75,10 +102,11 @@ def wasserstein(
     w = _wasserstein(real_scores, generated_scores)
 
     if bootstrap_ci:
+        real_rows, generated_rows = _legacy_bootstrap_pools(score_df, "score")
         ci, losses = _bootstrap(
-            real_scores,
-            generated_scores,
-            _wasserstein,
+            real_rows,
+            generated_rows,
+            _bootstrap_wasserstein,
             n_bootstrap,
             ci_alpha,
             w,
@@ -114,18 +142,37 @@ def l1_by_group(
         return (group_counts.score_x - group_counts.score_y).abs().sum() / 2.
 
     def _calc_l1_samples(
-        real_groups: np.ndarray, generated_groups: np.ndarray
+        real_rows: np.ndarray, generated_rows: np.ndarray
     ) -> float:
-        real_counts = np.bincount(real_groups, minlength=n_groups).astype(float)
-        generated_counts = np.bincount(
-            generated_groups, minlength=n_groups
+        rows = np.concatenate((real_rows, generated_rows), axis=0)
+        real_groups = rows[rows[:, 1] == 1, 0].astype(np.intp)
+        generated_groups = rows[rows[:, 1] == 0, 0].astype(np.intp)
+        real_valid = rows[rows[:, 1] == 1, 2] == 1
+        generated_valid = rows[rows[:, 1] == 0, 2] == 1
+        real_counts = np.bincount(
+            real_groups[real_valid], minlength=n_groups
         ).astype(float)
-        used_groups = (real_counts != 0) | (generated_counts != 0)
+        generated_counts = np.bincount(
+            generated_groups[generated_valid], minlength=n_groups
+        ).astype(float)
+        used_groups = (
+            np.bincount(real_groups, minlength=n_groups) != 0
+        ) | (
+            np.bincount(generated_groups, minlength=n_groups) != 0
+        )
         real_counts = real_counts[used_groups]
         generated_counts = generated_counts[used_groups]
-        real_counts /= real_counts.sum()
-        generated_counts /= generated_counts.sum()
-        return np.abs(real_counts - generated_counts).sum() / 2.
+        real_total = real_counts.sum()
+        generated_total = generated_counts.sum()
+        if real_total == 0:
+            real_counts.fill(np.nan)
+        else:
+            real_counts /= real_total
+        if generated_total == 0:
+            generated_counts.fill(np.nan)
+        else:
+            generated_counts /= generated_total
+        return np.nansum(np.abs(real_counts - generated_counts)) / 2.
 
     if ('generated' not in score_df['type'].values) or ('real' not in score_df['type'].values):
         if bootstrap_ci:
@@ -135,17 +182,16 @@ def l1_by_group(
     l1 = _calc_l1(score_df)
 
     if bootstrap_ci:
-        real_groups = score_df.loc[score_df['type'] == 'real', 'group'].to_numpy()
-        generated_groups = score_df.loc[
-            score_df['type'] == 'generated', 'group'
-        ].to_numpy()
-        groups = np.union1d(real_groups, generated_groups)
+        groups = np.union1d(score_df["group"].to_numpy(), score_df["group"].to_numpy())
         n_groups = len(groups)
-        real_group_codes = np.searchsorted(groups, real_groups)
-        generated_group_codes = np.searchsorted(groups, generated_groups)
+        real_rows, generated_rows = _legacy_bootstrap_pools(
+            score_df, "group", include_score_valid=True
+        )
+        real_rows[:, 0] = np.searchsorted(groups, real_rows[:, 0])
+        generated_rows[:, 0] = np.searchsorted(groups, generated_rows[:, 0])
         l1_ci, l1s = _bootstrap(
-            real_group_codes,
-            generated_group_codes,
+            real_rows,
+            generated_rows,
             _calc_l1_samples,
             n_bootstrap,
             ci_alpha,
