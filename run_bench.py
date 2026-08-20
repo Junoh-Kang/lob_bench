@@ -164,25 +164,117 @@ def load_results(save_path):
     return tup
 
 
-def run_benchmark(
-    args: argparse.Namespace,
+def run_benchmark_for_loader(
+    loader,
+    *,
+    save_dir: str,
+    stock: str,
+    model_name: str,
+    model_version: str | None = None,
+    divergence_horizon: int = 100,
+    uncond_only: bool = False,
+    cond_only: bool = False,
+    div_only: bool = False,
+    div_error_bounds: bool = False,
     scoring_config: dict[str, Any] = None,
     scoring_config_cond: dict[str, Any] = None,
     metric_config: dict[str, Any] = None,
 ) -> None:
-    
-    print("*** \tThe assumed file structure for files in this package is:\n"
-                "***\t \t {DATA_DIR}/{MODEL}/{STOCK}/data_*\n"
-                "***\twhereby DATA_DIR is passed as an argument when launching the script\n"
-                "***\t{MODEL}s and {STOCK}s may either be passed as a str or a list of str\n"
-                "***\tThe script will iterate over all combinations of models and stocks\n")
-
+    """Run every selected score mode against an already constructed loader."""
     if scoring_config is None:
         scoring_config = DEFAULT_SCORING_CONFIG
     if scoring_config_cond is None:
         scoring_config_cond = DEFAULT_SCORING_CONFIG_COND
     if metric_config is None:
         metric_config = DEFAULT_METRICS
+
+    # materialize all sequences, so we keep them in memory for multiple accesses
+    for s in loader:
+        s.materialize()
+
+    time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    scores_ = None
+    if not cond_only and not div_only:
+        print("[*] Running unconditional scoring")
+        scores, score_dfs, plot_fns = scoring.run_benchmark(
+            loader,
+            scoring_config,
+            default_metric=metric_config,
+        )
+        print("[*] Saving results...")
+        save_results(
+            scores,
+            score_dfs,
+            save_dir + "/scores"
+            + f"/scores_uncond_{stock}_{model_name}_{str(model_version)}_{time_str}.pkl",
+        )
+        print("... done")
+
+    if not uncond_only and not div_only:
+        print("[*] Running conditional scoring")
+        scores_cond, score_dfs_cond, plot_fns_cond = scoring.run_benchmark(
+            loader,
+            scoring_config_cond,
+            default_metric=metric_config,
+        )
+        print("[*] Saving results...")
+        save_results(
+            scores_cond,
+            score_dfs_cond,
+            save_dir + "/scores"
+            + f"/scores_cond_{stock}_{model_name}_{time_str}.pkl",
+        )
+        print("...done")
+
+    if not cond_only and not uncond_only:
+        print("[*] Running divergence scoring")
+        scores_, score_dfs_, plot_fns_ = scoring.run_benchmark(
+            loader,
+            scoring_config,
+            metrics.l1_by_group,
+            divergence_horizon=divergence_horizon,
+            divergence=True,
+        )
+        print("[*] Saving results...")
+        save_results(
+            scores_,
+            score_dfs_,
+            save_dir + "/scores"
+            + f"/scores_div_{stock}_{model_name}_{divergence_horizon}_{time_str}.pkl",
+        )
+
+    if div_error_bounds:
+        if scores_ is None:
+            raise ValueError(
+                "cannot calculate divergence error bounds without divergence scores"
+            )
+        print("[*] Calculating divergence lower bounds...")
+        baseline_errors_by_score = scoring.calc_baseline_errors_by_score(
+            score_dfs_,
+            metrics.l1_by_group,
+        )
+        print("[*] Saving baseline errors...")
+        save_results(
+            baseline_errors_by_score,
+            None,
+            save_dir + "/scores"
+            + f"/scores_div_{stock}_REAL_{divergence_horizon}_{time_str}.pkl",
+        )
+
+    print("[*] Done")
+
+
+def run_benchmark(
+    args: argparse.Namespace,
+    scoring_config: dict[str, Any] = None,
+    scoring_config_cond: dict[str, Any] = None,
+    metric_config: dict[str, Any] = None,
+) -> None:
+    print("*** \tThe assumed file structure for files in this package is:\n"
+                "***\t \t {DATA_DIR}/{MODEL}/{STOCK}/data_*\n"
+                "***\twhereby DATA_DIR is passed as an argument when launching the script\n"
+                "***\t{MODEL}s and {STOCK}s may either be passed as a str or a list of str\n"
+                "***\tThe script will iterate over all combinations of models and stocks\n")
 
     if isinstance(args.stock, str):
         args.stock = [args.stock]
@@ -211,81 +303,21 @@ def run_benchmark(
                         stock_model_path  + "/data_gen", 
                         stock_model_path  + "/data_cond", 
                     )
-
-                    # materialize all sequences, so we keep them in memory
-                    # for multiple accesses
-                    for s in loader:
-                        s.materialize()
-
-                    time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    if (not args.cond_only) and (not args.div_only):
-                        print("[*] Running unconditional scoring")
-                        scores, score_dfs, plot_fns = scoring.run_benchmark(
-                            loader,
-                            scoring_config,
-                            # default_metric=metrics.l1_by_group
-                            # default_metric=metrics.wasserstein
-                            default_metric=metric_config
-                        )
-                        print("[*] Saving results...")
-                        save_results(
-                            scores,
-                            score_dfs,
-                            args.save_dir+"/scores"
-                            + f"/scores_uncond_{stock}_{model_name}_{str(mv)}_{time_str}.pkl"
-                        )
-                        print("... done")
-
-                    if (not args.uncond_only) and (not args.div_only):
-                        print("[*] Running conditional scoring")
-                        scores_cond, score_dfs_cond, plot_fns_cond = scoring.run_benchmark(
-                            loader,
-                            scoring_config_cond,
-                            # default_metric=metrics.l1_by_group
-                            # default_metric=metrics.wasserstein
-                            default_metric=metric_config
-                        )
-                        print("[*] Saving results...")
-                        save_results(
-                            scores_cond,
-                            score_dfs_cond,
-                            args.save_dir+"/scores"
-                            + f"/scores_cond_{stock}_{model_name}_{time_str}.pkl"
-                        )
-                        print("...done")
-
-                    if (not args.cond_only) and (not args.uncond_only):
-                        print("[*] Running divergence scoring")
-                        scores_, score_dfs_, plot_fns_ = scoring.run_benchmark(
-                            loader, scoring_config, metrics.l1_by_group,
-                            divergence_horizon=args.divergence_horizon,
-                            divergence=True
-                        )
-                        print("[*] Saving results...")
-                        save_results(
-                            scores_,
-                            score_dfs_,
-                            args.save_dir+"/scores"
-                            + f"/scores_div_{stock}_{model_name}_"
-                            + f"{args.divergence_horizon}_{time_str}.pkl"
-                        )
-
-                    if args.div_error_bounds:
-                        print("[*] Calculating divergence lower bounds...")
-                        baseline_errors_by_score = scoring.calc_baseline_errors_by_score(
-                            score_dfs_,
-                            metrics.l1_by_group
-                        )
-                        print("[*] Saving baseline errors...")
-                        save_results(
-                            baseline_errors_by_score,
-                            None,
-                            args.save_dir+"/scores"
-                            + f"/scores_div_{stock}_REAL_"
-                            + f"{args.divergence_horizon}_{time_str}.pkl"
-                        )
-
-                    print("[*] Done")
+                    run_benchmark_for_loader(
+                        loader,
+                        save_dir=args.save_dir,
+                        stock=stock,
+                        model_name=model_name,
+                        model_version=mv,
+                        divergence_horizon=args.divergence_horizon,
+                        uncond_only=args.uncond_only,
+                        cond_only=args.cond_only,
+                        div_only=args.div_only,
+                        div_error_bounds=args.div_error_bounds,
+                        scoring_config=scoring_config,
+                        scoring_config_cond=scoring_config_cond,
+                        metric_config=metric_config,
+                    )
 
 
 
