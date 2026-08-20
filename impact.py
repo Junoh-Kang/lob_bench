@@ -1,7 +1,7 @@
 """
 Functions to estimate market impact of different events produced by the model, and compared to real data behaviour.
 """
-from typing import Optional
+from typing import Optional, Sequence
 import numpy as np
 import pandas as pd
 from decimal import Decimal
@@ -292,6 +292,81 @@ def _apply_to_Sequences(fun,CI,max_seq,args,loader:Simple_Loader):
     return results[0],results[1]
 
 
+def _classify_impact_sequence(m_df, b_df, realid=0, date=''):
+    """Return the classified touch events for one real or generated sequence."""
+    filtered_df = _filter_touch_events(m_df, b_df, realid, date)
+    if filtered_df.empty:
+        return None
+    return _classify_event_types(filtered_df)
+
+
+def _cache_classified_impact_sequences(
+        loader: Simple_Loader,
+        max_seq: int,
+) -> tuple[tuple[Optional[pd.DataFrame], tuple[Optional[pd.DataFrame], ...]], ...]:
+    """Materialize the event classification shared by every impact lag."""
+    cached = []
+    for i in tqdm.tqdm(
+            range(0, min(max_seq, len(loader))),
+            desc="Classifying sequences",
+    ):
+        sequence = loader[i]
+        real = _classify_impact_sequence(
+            sequence.m_real,
+            sequence.b_real,
+            sequence.real_id,
+            sequence.date,
+        )
+        generated = tuple(
+            _classify_impact_sequence(
+                m_gen,
+                b_gen,
+                sequence.real_id,
+                sequence.date,
+            )
+            for m_gen, b_gen in zip(sequence.m_gen, sequence.b_gen)
+        )
+        cached.append((real, generated))
+    return tuple(cached)
+
+
+def _apply_to_classified_sequences(
+        fun,
+        CI,
+        args,
+        sequences: Sequence[tuple[Optional[pd.DataFrame], tuple[Optional[pd.DataFrame], ...]]],
+):
+    """Calculate one impact response from cached, classified sequences."""
+    print(args[1], end="\r")
+    metrics_real = []
+    metrics_gen = []
+    for real_df, generated_dfs in sequences:
+        if real_df is not None:
+            metrics_real.append(fun(*args, real_df))
+        for gen_df in generated_dfs:
+            if gen_df is not None:
+                metrics_gen.append(fun(*args, gen_df))
+    metrics_real = pd.concat(metrics_real, axis=0)
+    metrics_gen = pd.concat(metrics_gen, axis=0)
+    results = []
+    for metrics in [metrics_real, metrics_gen]:
+        array_metrics = np.array(metrics[~np.isnan(metrics)])
+        unique = np.unique(array_metrics).shape[0]
+        if unique > 1:
+            res = st.bootstrap(
+                (array_metrics,),
+                np.mean,
+                confidence_level=CI,
+                n_resamples=1000,
+                method='basic',
+            )
+            ci = res.confidence_interval
+        else:
+            ci = ConfidenceInterval(0, 0)
+        results.append((metrics.mean(), ci))
+    return results[0], results[1]
+
+
 
 
 def macro_impact_compare(max_seq,ticksize,Nbins,loader):
@@ -405,10 +480,19 @@ def impact_compare(loader:Simple_Loader,
     confidence_ints_real=[]
     confidence_ints_gen=[]
     diff={}
+    classified_sequences = _cache_classified_impact_sequences(loader, max_seq=8192)
 
     for event in events:
         print("Calculating for event type: ", event)
-        r,g=zip(*[_apply_to_Sequences(_response_func,0.99,8192,(event,i,ticksize),loader) for i in x])
+        r,g=zip(*[
+            _apply_to_classified_sequences(
+                _response_func,
+                0.99,
+                (event, i, ticksize),
+                classified_sequences,
+            )
+            for i in x
+        ])
         r_m,r_ci=zip(*r)
         g_m,g_ci=zip(*g)
         ys_real.append(np.array(r_m))
@@ -778,4 +862,3 @@ if __name__ == '__main__':
     print("Finished Run, time (s) is:", t1-t0)
 
 
-   
