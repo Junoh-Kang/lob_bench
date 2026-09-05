@@ -2,6 +2,8 @@
 Functions to estimate market impact of different events produced by the model, and compared to real data behaviour.
 """
 from typing import Optional, Sequence
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import get_context
 import numpy as np
 import pandas as pd
 from decimal import Decimal
@@ -23,6 +25,49 @@ import tqdm
 
 from collections import namedtuple
 ConfidenceInterval = namedtuple("ConfidenceInterval", ["low", "high"])
+
+
+_IMPACT_WORKER_SEQUENCES = None
+_IMPACT_CLASSIFY_LOADER = None
+
+
+def _init_impact_worker(sequences):
+    global _IMPACT_WORKER_SEQUENCES
+    _IMPACT_WORKER_SEQUENCES = sequences
+
+
+def _impact_response_worker(args):
+    return _apply_to_classified_sequences(
+        _response_func,
+        0.99,
+        args,
+        _IMPACT_WORKER_SEQUENCES,
+    )
+
+
+def _init_impact_classification_worker(loader):
+    global _IMPACT_CLASSIFY_LOADER
+    _IMPACT_CLASSIFY_LOADER = loader
+
+
+def _classify_impact_worker(index):
+    sequence = _IMPACT_CLASSIFY_LOADER[index]
+    real = _classify_impact_sequence(
+        sequence.m_real,
+        sequence.b_real,
+        sequence.real_id,
+        sequence.date,
+    )
+    generated = tuple(
+        _classify_impact_sequence(
+            m_gen,
+            b_gen,
+            sequence.real_id,
+            sequence.date,
+        )
+        for m_gen, b_gen in zip(sequence.m_gen, sequence.b_gen)
+    )
+    return real, generated
 
 def _filter_sequence_for_impact(message_sequence : pd.DataFrame,
                                 book_sequence: pd.DataFrame,
@@ -303,31 +348,30 @@ def _classify_impact_sequence(m_df, b_df, realid=0, date=''):
 def _cache_classified_impact_sequences(
         loader: Simple_Loader,
         max_seq: int,
+        workers: int = 1,
 ) -> tuple[tuple[Optional[pd.DataFrame], tuple[Optional[pd.DataFrame], ...]], ...]:
     """Materialize the event classification shared by every impact lag."""
-    cached = []
-    for i in tqdm.tqdm(
-            range(0, min(max_seq, len(loader))),
-            desc="Classifying sequences",
-    ):
-        sequence = loader[i]
-        real = _classify_impact_sequence(
-            sequence.m_real,
-            sequence.b_real,
-            sequence.real_id,
-            sequence.date,
+    indices = range(0, min(max_seq, len(loader)))
+    if workers == 1:
+        _init_impact_classification_worker(loader)
+        return tuple(
+            _classify_impact_worker(index)
+            for index in tqdm.tqdm(indices, desc="Classifying sequences")
         )
-        generated = tuple(
-            _classify_impact_sequence(
-                m_gen,
-                b_gen,
-                sequence.real_id,
-                sequence.date,
+
+    with ProcessPoolExecutor(
+        max_workers=min(workers, len(loader), max_seq),
+        mp_context=get_context("fork"),
+        initializer=_init_impact_classification_worker,
+        initargs=(loader,),
+    ) as executor:
+        return tuple(
+            tqdm.tqdm(
+                executor.map(_classify_impact_worker, indices),
+                total=min(max_seq, len(loader)),
+                desc="Classifying sequences",
             )
-            for m_gen, b_gen in zip(sequence.m_gen, sequence.b_gen)
         )
-        cached.append((real, generated))
-    return tuple(cached)
 
 
 def _apply_to_classified_sequences(
@@ -471,7 +515,10 @@ def impact_compare(loader:Simple_Loader,
                    ticker:str="BLANK",
                    model="BLANK",
                    ticksize=100,
-                   save_dir='./'):
+                   save_dir='./',
+                   workers: int = 1):
+    if workers <= 0:
+        raise ValueError("workers must be positive")
     x=(10** np.arange(0.3,2.4,step=0.1)).astype(int) # Lag l values
     [1]+list(x)
     events=['MO_0','MO_1','LO_0','LO_1','CA_0','CA_1'] # Bouchaud event types from 6 propagator model.
@@ -480,19 +527,33 @@ def impact_compare(loader:Simple_Loader,
     confidence_ints_real=[]
     confidence_ints_gen=[]
     diff={}
-    classified_sequences = _cache_classified_impact_sequences(loader, max_seq=8192)
+    classified_sequences = _cache_classified_impact_sequences(
+        loader, max_seq=8192, workers=workers
+    )
 
-    for event in events:
-        print("Calculating for event type: ", event)
-        r,g=zip(*[
+    tasks = [(event, lag, ticksize) for event in events for lag in x]
+    if workers == 1:
+        responses = [
             _apply_to_classified_sequences(
                 _response_func,
                 0.99,
-                (event, i, ticksize),
+                args,
                 classified_sequences,
             )
-            for i in x
-        ])
+            for args in tasks
+        ]
+    else:
+        with ProcessPoolExecutor(
+            max_workers=min(workers, len(tasks)),
+            mp_context=get_context("fork"),
+            initializer=_init_impact_worker,
+            initargs=(classified_sequences,),
+        ) as executor:
+            responses = list(executor.map(_impact_response_worker, tasks))
+
+    for event_index, event in enumerate(events):
+        print("Calculating for event type: ", event)
+        r,g=zip(*responses[event_index * len(x):(event_index + 1) * len(x)])
         r_m,r_ci=zip(*r)
         g_m,g_ci=zip(*g)
         ys_real.append(np.array(r_m))
@@ -860,5 +921,3 @@ if __name__ == '__main__':
     run_impact(args)
     t1=time.time()
     print("Finished Run, time (s) is:", t1-t0)
-
-

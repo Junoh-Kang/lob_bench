@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+import os
 import pickle
 import sys
 from typing import Any, Iterable
@@ -225,6 +226,8 @@ def run_payload(
     model_name: str,
     time_period: str,
     divergence_horizon: int,
+    workers: int = 1,
+    bootstrap_workers: int = 1,
 ) -> InMemoryLoader:
     """Run distributional and impact metrics over one shared in-memory loader."""
     if not isinstance(payload, dict):
@@ -240,12 +243,16 @@ def run_payload(
         model_name=model_name,
         divergence_horizon=divergence_horizon,
         scoring_config=run_bench.RAW_REFERENCE_SCORING_CONFIG,
+        workers=workers,
+        bootstrap_workers=bootstrap_workers,
+        include_score_dfs=False,
     )
     impact.impact_compare(
         loader,
         ticker=stock,
         model=model_name,
         save_dir=f"{save_dir}/impact/{stock}/{model_name}",
+        workers=workers,
     )
     return loader
 
@@ -257,9 +264,15 @@ def main() -> None:
     parser.add_argument("--save_dir", required=True)
     parser.add_argument("--model_name", required=True)
     parser.add_argument("--divergence_horizon", type=int, default=100)
+    parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
+    parser.add_argument(
+        "--bootstrap-workers", type=int, default=min(16, os.cpu_count() or 1)
+    )
     args = parser.parse_args()
     if args.divergence_horizon <= 0:
         raise ValueError("divergence_horizon must be positive")
+    if args.workers <= 0 or args.bootstrap_workers <= 0:
+        raise ValueError("workers must be positive")
 
     payload = pickle.load(sys.stdin.buffer)
     loader = run_payload(
@@ -269,6 +282,8 @@ def main() -> None:
         model_name=args.model_name,
         time_period=args.time_period,
         divergence_horizon=args.divergence_horizon,
+        workers=args.workers,
+        bootstrap_workers=args.bootstrap_workers,
     )
     print(json.dumps({"status": "complete", "sequence_count": len(loader)}))
 

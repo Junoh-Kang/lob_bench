@@ -2,10 +2,30 @@
 """
 
 import itertools
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import get_context
 from typing import Callable, Iterable, Optional, Union
 import numpy as np
 import pandas as pd
 import data_loading
+
+
+_WORKER_SEQUENCES = None
+_WORKER_SCORING_FN = None
+_WORKER_SCORE_REAL = None
+
+
+def _init_score_worker(sequences, scoring_fn, score_real):
+    global _WORKER_SEQUENCES, _WORKER_SCORING_FN, _WORKER_SCORE_REAL
+    _WORKER_SEQUENCES = sequences
+    _WORKER_SCORING_FN = scoring_fn
+    _WORKER_SCORE_REAL = score_real
+
+
+def _score_worker(index):
+    return _score_seq(
+        _WORKER_SEQUENCES[index], _WORKER_SCORING_FN, _WORKER_SCORE_REAL
+    )
 
 
 def flatten(l, ltypes=(list, tuple)):
@@ -135,41 +155,52 @@ def score_cond(
 def score_real_gen(
         seqs: Iterable[data_loading.Lobster_Sequence],
         scoring_fn: Callable[[pd.DataFrame, pd.DataFrame], float],
+        workers: int = 1,
     ) -> list:
     """
     """
-    scores_real = _score_data(seqs, scoring_fn, score_real=True)
-    scores_gen = _score_data(seqs, scoring_fn, score_real=False)
+    scores_real = _score_data(seqs, scoring_fn, score_real=True, workers=workers)
+    scores_gen = _score_data(seqs, scoring_fn, score_real=False, workers=workers)
     return scores_real, scores_gen
 
 def score_real(
         seqs: Iterable[data_loading.Lobster_Sequence],
         scoring_fn: Callable[[pd.DataFrame, pd.DataFrame], float],
+        workers: int = 1,
     ) -> list:
     """
     """
-    return _score_data(seqs, scoring_fn, score_real=True)
+    return _score_data(seqs, scoring_fn, score_real=True, workers=workers)
 
 def score_gen(
         seqs: Iterable[data_loading.Lobster_Sequence],
         scoring_fn: Callable[[pd.DataFrame, pd.DataFrame], float],
+        workers: int = 1,
     ) -> list:
     """
     """
-    return _score_data(seqs, scoring_fn, score_real=False)
+    return _score_data(seqs, scoring_fn, score_real=False, workers=workers)
 
 def _score_data(
         seqs: Iterable[data_loading.Lobster_Sequence],
         scoring_fn: Callable[[pd.DataFrame, pd.DataFrame], float],
         score_real: bool,
+        workers: int = 1,
     ) -> float:
     """
     """
-    scores = []
-    for seq in seqs:
-        score_i = _score_seq(seq, scoring_fn, score_real)
-        scores.append(score_i)
-    return scores
+    sequences = tuple(seqs)
+    if workers <= 1 or len(sequences) <= 1:
+        return [_score_seq(seq, scoring_fn, score_real) for seq in sequences]
+
+    worker_count = min(workers, len(sequences))
+    with ProcessPoolExecutor(
+        max_workers=worker_count,
+        mp_context=get_context("fork"),
+        initializer=_init_score_worker,
+        initargs=(sequences, scoring_fn, score_real),
+    ) as executor:
+        return list(executor.map(_score_worker, range(len(sequences))))
 
 def _score_seq(
         seq: data_loading.Lobster_Sequence,

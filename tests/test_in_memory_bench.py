@@ -150,6 +150,8 @@ class InMemoryBenchTest(unittest.TestCase):
                 model_name="s5",
                 time_period="2025-03-10",
                 divergence_horizon=100,
+                workers=3,
+                bootstrap_workers=2,
             )
         finally:
             in_memory_bench.run_bench.run_benchmark_for_loader = original_run
@@ -158,6 +160,9 @@ class InMemoryBenchTest(unittest.TestCase):
         self.assertIs(observed["distributional"][0], loader)
         self.assertIs(observed["impact"][0], loader)
         self.assertEqual(observed["distributional"][1]["divergence_horizon"], 100)
+        self.assertEqual(observed["distributional"][1]["workers"], 3)
+        self.assertEqual(observed["distributional"][1]["bootstrap_workers"], 2)
+        self.assertEqual(observed["impact"][1]["workers"], 3)
         self.assertEqual(
             observed["impact"][1]["save_dir"],
             "/tmp/lob-bench-results/impact/GOOG/s5",

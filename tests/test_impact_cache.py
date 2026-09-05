@@ -156,6 +156,34 @@ def _assert_saved_tuples_equal(test_case, expected, actual):
 
 
 class ImpactCacheTest(unittest.TestCase):
+    def test_parallel_impact_preserves_point_estimates(self):
+        with _deterministic_bootstrap(), _quiet_progress(), contextlib.redirect_stdout(None):
+            with tempfile.TemporaryDirectory() as sequential_output, tempfile.TemporaryDirectory() as parallel_output:
+                sequential = impact.impact_compare(
+                    _two_window_loader(),
+                    ticker="TEST",
+                    model="sequential",
+                    save_dir=sequential_output,
+                    workers=1,
+                )["Saved_Tuple"]
+                parallel = impact.impact_compare(
+                    _two_window_loader(),
+                    ticker="TEST",
+                    model="parallel",
+                    save_dir=parallel_output,
+                    workers=2,
+                )["Saved_Tuple"]
+
+        np.testing.assert_array_equal(parallel[0], sequential[0])
+        for parallel_curves, sequential_curves in zip(
+            parallel[1:3], sequential[1:3]
+        ):
+            for parallel_curve, sequential_curve in zip(
+                parallel_curves, sequential_curves
+            ):
+                np.testing.assert_array_equal(parallel_curve, sequential_curve)
+        np.testing.assert_array_equal(parallel[5], sequential[5])
+
     def test_cached_impact_matches_reference_and_classifies_each_sequence_once(self):
         loader = _two_window_loader()
         with _deterministic_bootstrap(), _quiet_progress():

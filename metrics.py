@@ -1,3 +1,5 @@
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import get_context
 from typing import Callable, Optional,Union
 import numpy as np
 import pandas as pd
@@ -16,7 +18,36 @@ from sklearn.neighbors import KernelDensity
 from scipy.spatial import cKDTree
 
 
-# TODO: optimise this performance-wise:
+_BOOTSTRAP_REAL_VALUES = None
+_BOOTSTRAP_GENERATED_VALUES = None
+_BOOTSTRAP_LOSS_FN = None
+_BOOTSTRAP_REAL_INDICES = None
+_BOOTSTRAP_GENERATED_INDICES = None
+
+
+def _init_bootstrap_worker(
+    real_values,
+    generated_values,
+    loss_fn,
+    real_indices,
+    generated_indices,
+):
+    global _BOOTSTRAP_REAL_VALUES, _BOOTSTRAP_GENERATED_VALUES
+    global _BOOTSTRAP_LOSS_FN, _BOOTSTRAP_REAL_INDICES, _BOOTSTRAP_GENERATED_INDICES
+    _BOOTSTRAP_REAL_VALUES = real_values
+    _BOOTSTRAP_GENERATED_VALUES = generated_values
+    _BOOTSTRAP_LOSS_FN = loss_fn
+    _BOOTSTRAP_REAL_INDICES = real_indices
+    _BOOTSTRAP_GENERATED_INDICES = generated_indices
+
+
+def _bootstrap_worker(index):
+    return _BOOTSTRAP_LOSS_FN(
+        _BOOTSTRAP_REAL_VALUES[_BOOTSTRAP_REAL_INDICES[index]],
+        _BOOTSTRAP_GENERATED_VALUES[_BOOTSTRAP_GENERATED_INDICES[index]],
+    )
+
+
 def _bootstrap(
     real_values: np.ndarray,
     generated_values: np.ndarray,
@@ -25,7 +56,10 @@ def _bootstrap(
     ci_alpha: float = 0.01,
     whole_data_loss: Optional[float] = None,
     rng_np: np.random.Generator = np.random.default_rng(12345),
+    workers: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
+    if workers <= 0:
+        raise ValueError("workers must be positive")
     if whole_data_loss is not None:
         losses = [whole_data_loss]
     else:
@@ -38,10 +72,25 @@ def _bootstrap(
     gen_btstr_idcx = rng_np.integers(
         0, len(generated_values), size=(n_bootstrap, len(generated_values))
     )
-    for i in range(n_bootstrap):
-        losses.append(
+    if workers == 1:
+        losses.extend(
             loss_fn(real_values[real_btstr_idcx[i]], generated_values[gen_btstr_idcx[i]])
+            for i in range(n_bootstrap)
         )
+    else:
+        with ProcessPoolExecutor(
+            max_workers=min(workers, n_bootstrap),
+            mp_context=get_context("fork"),
+            initializer=_init_bootstrap_worker,
+            initargs=(
+                real_values,
+                generated_values,
+                loss_fn,
+                real_btstr_idcx,
+                gen_btstr_idcx,
+            ),
+        ) as executor:
+            losses.extend(executor.map(_bootstrap_worker, range(n_bootstrap)))
     losses = np.array(losses)
 
     # get the percentiles of the bootstrapped loss values
@@ -75,6 +124,7 @@ def wasserstein(
     n_bootstrap: int = 100,
     ci_alpha: float = 0.01,
     rng_np: np.random.Generator = np.random.default_rng(12345),
+    workers: int = 1,
 ):
     def _wasserstein(real_scores: np.ndarray, generated_scores: np.ndarray):
         return stats.wasserstein_distance(real_scores, generated_scores)
@@ -111,6 +161,7 @@ def wasserstein(
             ci_alpha,
             w,
             rng_np,
+            workers,
         )
         return w, ci, losses
     else:
@@ -122,6 +173,7 @@ def l1_by_group(
     n_bootstrap: int = 100,
     ci_alpha: float = 0.01,
     rng_np: np.random.Generator = np.random.default_rng(12345),
+    workers: int = 1,
 ) -> Union[float , tuple[float, np.ndarray, np.ndarray]]:
     """
     Takes a "score dataframe" with columns "score" (real numbers),
@@ -197,6 +249,7 @@ def l1_by_group(
             ci_alpha,
             l1,
             rng_np,
+            workers,
         )
         return l1, l1_ci, l1s
     else:

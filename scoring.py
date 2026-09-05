@@ -10,8 +10,9 @@ import data_loading
 class ScoreCache:
     """Reuse raw sequence scores while each mode keeps its own metric logic."""
 
-    def __init__(self, loader: data_loading.Simple_Loader) -> None:
+    def __init__(self, loader: data_loading.Simple_Loader, workers: int = 1) -> None:
         self.loader = loader
+        self.workers = workers
         self._real_scores = {}
         self._generated_scores = {}
         self._subsequences = {}
@@ -20,14 +21,14 @@ class ScoreCache:
     def score_real(self, scoring_fn):
         if scoring_fn not in self._real_scores:
             self._real_scores[scoring_fn] = partitioning.score_real(
-                self.loader, scoring_fn
+                self.loader, scoring_fn, workers=self.workers
             )
         return self._real_scores[scoring_fn]
 
     def score_generated(self, scoring_fn):
         if scoring_fn not in self._generated_scores:
             self._generated_scores[scoring_fn] = partitioning.score_gen(
-                self.loader, scoring_fn
+                self.loader, scoring_fn, workers=self.workers
             )
         return self._generated_scores[scoring_fn]
 
@@ -46,7 +47,7 @@ class ScoreCache:
         key = (scoring_fn, horizon_length)
         if key not in self._horizon_generated_scores:
             self._horizon_generated_scores[key] = partitioning.score_gen(
-                self.subsequences(horizon_length), scoring_fn
+                self.subsequences(horizon_length), scoring_fn, workers=self.workers
             )
         return self._horizon_generated_scores[key]
 
@@ -152,6 +153,7 @@ def score_data_cond(
     score_kwargs: dict = {},
     score_cond_kwargs: dict = {},
     score_cache: ScoreCache | None = None,
+    bootstrap_workers: int = 1,
 ):
     """
     Grouping is done based on the scoring_fn_cond
@@ -335,6 +337,7 @@ def compute_metrics(
     score_kwargs: dict = {},
     score_cond_kwargs: dict = {},
     score_cache: ScoreCache | None = None,
+    bootstrap_workers: int = 1,
 ) -> tuple[float, pd.DataFrame, Callable]:
     # unconditional scoring
     if scoring_fn_cond is None:
@@ -345,7 +348,10 @@ def compute_metrics(
             score_cache=score_cache,
             **score_kwargs,
         )
-        metric = {m_name: m(score_df) for m_name, m in metric_fn.items()}
+        metric = {
+            m_name: m(score_df, workers=bootstrap_workers)
+            for m_name, m in metric_fn.items()
+        }
 
     # conditional scoring
     else:
@@ -367,7 +373,10 @@ def compute_metrics(
             group.group = group.subgroup
             losses.append(
                 np.stack(
-                    tuple(mfn(group)[2] for mfn in metric_fn.values()),
+                    tuple(
+                        mfn(group, workers=bootstrap_workers)[2]
+                        for mfn in metric_fn.values()
+                    ),
                     axis=-1
                 )
             )
@@ -434,6 +443,7 @@ def compute_divergence_metrics(
                    Iterable[Callable[[pd.DataFrame], float]]],
         horizon_length: int,
         score_cache: ScoreCache | None = None,
+        bootstrap_workers: int = 1,
         **kwargs,
     ):
     """
@@ -447,7 +457,9 @@ def compute_divergence_metrics(
         **kwargs,
     )
     # L1 scores for each horizon distribution
-    loss_horizons = [metric_fn(sdf) for sdf in score_dfs_horizon]
+    loss_horizons = [
+        metric_fn(sdf, workers=bootstrap_workers) for sdf in score_dfs_horizon
+    ]
 
     plot_fn = lambda title, ax: plotting.error_divergence_plot(
         loss_horizons,
@@ -467,6 +479,7 @@ def run_benchmark(
     divergence: bool = False,
     divergence_horizon: int = 50,
     score_cache: ScoreCache | None = None,
+    bootstrap_workers: int = 1,
 ) -> tuple[
     dict[str, float],
     dict[str, pd.DataFrame],
@@ -504,6 +517,7 @@ def run_benchmark(
                     metric_fns,
                     divergence_horizon,
                     score_cache=score_cache,
+                    bootstrap_workers=bootstrap_workers,
                     **get_kwargs(score_config)
                 )
 
@@ -517,6 +531,7 @@ def run_benchmark(
                     score_kwargs=score_kwargs,
                     score_cond_kwargs=score_cond_kwargs,
                     score_cache=score_cache,
+                    bootstrap_workers=bootstrap_workers,
                 )
 
     return scores, score_dfs, plot_fns

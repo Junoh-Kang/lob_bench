@@ -78,6 +78,27 @@ def _reference_l1_by_group(score_df, n_bootstrap, rng):
 
 
 class MetricsBootstrapTest(unittest.TestCase):
+    def test_parallel_bootstrap_preserves_wasserstein_and_l1_samples(self):
+        score_df = _score_frame()
+
+        for metric in (metrics.wasserstein, metrics.l1_by_group):
+            sequential = metric(
+                score_df,
+                n_bootstrap=11,
+                rng_np=np.random.default_rng(20260905),
+                workers=1,
+            )
+            parallel = metric(
+                score_df,
+                n_bootstrap=11,
+                rng_np=np.random.default_rng(20260905),
+                workers=2,
+            )
+
+            self.assertEqual(parallel[0], sequential[0])
+            np.testing.assert_array_equal(parallel[1], sequential[1])
+            np.testing.assert_array_equal(parallel[2], sequential[2])
+
     def test_wasserstein_bootstrap_matches_dataframe_reference_exactly(self):
         score_df = _score_frame()
         expected = _reference_wasserstein(

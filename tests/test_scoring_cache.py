@@ -51,6 +51,23 @@ def _price_score(messages, book):
 
 
 class ScoreCacheTest(unittest.TestCase):
+    def test_parallel_scoring_preserves_sequence_order_and_values(self):
+        loader = (_sequence(), _sequence(), _sequence())
+        score = lambda messages, book: messages.price.values
+
+        sequential = partitioning.score_real_gen(
+            loader, score, workers=1
+        )
+        parallel = partitioning.score_real_gen(
+            loader, score, workers=2
+        )
+
+        for sequential_scores, parallel_scores in zip(sequential, parallel):
+            for sequential_score, parallel_score in zip(
+                sequential_scores, parallel_scores
+            ):
+                np.testing.assert_array_equal(parallel_score, sequential_score)
+
     def test_cache_preserves_scores_and_partitions_each_horizon_once(self):
         loader = (_sequence(),)
         expected_real, expected_generated = partitioning.score_real_gen(

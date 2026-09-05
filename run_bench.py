@@ -6,6 +6,7 @@ from glob import glob
 import pickle
 import gzip
 import argparse
+import os
 from datetime import datetime
 
 import data_loading
@@ -201,19 +202,28 @@ def run_benchmark_for_loader(
     scoring_config: dict[str, Any] = None,
     scoring_config_cond: dict[str, Any] = None,
     metric_config: dict[str, Any] = None,
+    workers: int = 1,
+    bootstrap_workers: int = 1,
+    include_score_dfs: bool = True,
 ) -> None:
-    """Run every selected score mode against an already constructed loader."""
+    """Run every selected score mode against an already constructed loader.
+
+    ``score_dfs`` are replay-sized analysis payloads.  Callers that only need
+    reported scores may omit them from the serialized artifacts.
+    """
     if scoring_config is None:
         scoring_config = DEFAULT_SCORING_CONFIG
     if scoring_config_cond is None:
         scoring_config_cond = DEFAULT_SCORING_CONFIG_COND
     if metric_config is None:
         metric_config = DEFAULT_METRICS
+    if workers <= 0 or bootstrap_workers <= 0:
+        raise ValueError("workers must be positive")
 
     # materialize all sequences, so we keep them in memory for multiple accesses
     for s in loader:
         s.materialize()
-    score_cache = scoring.ScoreCache(loader)
+    score_cache = scoring.ScoreCache(loader, workers=workers)
 
     time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     scores_ = None
@@ -224,11 +234,12 @@ def run_benchmark_for_loader(
             scoring_config,
             default_metric=metric_config,
             score_cache=score_cache,
+            bootstrap_workers=bootstrap_workers,
         )
         print("[*] Saving results...")
         save_results(
             scores,
-            score_dfs,
+            score_dfs if include_score_dfs else None,
             save_dir + "/scores"
             + f"/scores_uncond_{stock}_{model_name}_{str(model_version)}_{time_str}.pkl",
         )
@@ -241,11 +252,12 @@ def run_benchmark_for_loader(
             scoring_config_cond,
             default_metric=metric_config,
             score_cache=score_cache,
+            bootstrap_workers=bootstrap_workers,
         )
         print("[*] Saving results...")
         save_results(
             scores_cond,
-            score_dfs_cond,
+            score_dfs_cond if include_score_dfs else None,
             save_dir + "/scores"
             + f"/scores_cond_{stock}_{model_name}_{time_str}.pkl",
         )
@@ -260,11 +272,12 @@ def run_benchmark_for_loader(
             divergence_horizon=divergence_horizon,
             divergence=True,
             score_cache=score_cache,
+            bootstrap_workers=bootstrap_workers,
         )
         print("[*] Saving results...")
         save_results(
             scores_,
-            score_dfs_,
+            score_dfs_ if include_score_dfs else None,
             save_dir + "/scores"
             + f"/scores_div_{stock}_{model_name}_{divergence_horizon}_{time_str}.pkl",
         )
@@ -343,6 +356,8 @@ def run_benchmark(
                         scoring_config=scoring_config,
                         scoring_config_cond=scoring_config_cond,
                         metric_config=metric_config,
+                        workers=args.workers,
+                        bootstrap_workers=args.bootstrap_workers,
                     )
 
 
@@ -360,6 +375,10 @@ if __name__ == "__main__":
     parser.add_argument("--div_only", action="store_true")
     parser.add_argument("--div_error_bounds", action="store_true")
     parser.add_argument("--divergence_horizon", type=int, default=100)
+    parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
+    parser.add_argument(
+        "--bootstrap-workers", type=int, default=min(16, os.cpu_count() or 1)
+    )
     args = parser.parse_args()
 
     assert not (args.uncond_only and args.cond_only), \
@@ -367,6 +386,7 @@ if __name__ == "__main__":
 
     assert not (args.div_error_bounds and (args.uncond_only or args.cond_only)), \
         "Cannot calculate divergence error bounds without running divergence scoring"
+    assert args.workers > 0 and args.bootstrap_workers > 0, "workers must be positive"
     t0=time.time()
     run_benchmark(args)
     t1=time.time()
