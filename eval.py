@@ -98,9 +98,15 @@ def spread(
         book: pd.DataFrame
     ) -> pd.Series:
     """
-    Calculate spread of book.
+    Calculate spread of book when both touch quotes are present.
+
+    The AlphaTrade fixed-width L2 representation uses a negative price as an
+    empty-level sentinel.  It is not a tradable quote, so a spread involving
+    either sentinel is undefined rather than a very large finite number.
     """
-    spread = book.iloc[:, 0] - book.iloc[:, 2]
+    best_ask = book.iloc[:, 0]
+    best_bid = book.iloc[:, 2]
+    spread = (best_ask - best_bid).where((best_ask >= 0) & (best_bid >= 0))
     spread.index = messages.time
     spread.name = 'spread'
     return spread
@@ -232,6 +238,17 @@ def time_to_cancel(messages: pd.DataFrame) -> pd.Series:
     if len(del_t) == 0:
         return pd.to_timedelta(pd.Series())
     return del_t
+
+
+def time_to_cancel_all(messages: pd.DataFrame) -> pd.Series:
+    """Calculate elapsed time since the original add for every cancel/delete."""
+    if "reference_time" not in messages:
+        raise ValueError("time_to_cancel_all requires raw reference timestamps")
+
+    cancellations = messages.loc[
+        messages.event_type.isin([2, 3]) & messages.reference_time.notna()
+    ]
+    return cancellations.time - cancellations.reference_time
 
 def total_volume(messages: pd.DataFrame, book: pd.DataFrame, n_levels: int) -> pd.Series:
     """

@@ -95,6 +95,27 @@ def score_data(
     else:
         scores_real, scores_gen = score_cache.score_real_gen(scoring_fn)
 
+    score_df = partitioning.get_score_table(scores_real, scores_gen, None, None)
+    score_values = score_df.score.to_numpy(dtype=float)
+    finite = np.isfinite(score_values)
+    nonfinite = {}
+    for score_type in ('real', 'generated'):
+        type_mask = score_df.type.to_numpy() == score_type
+        total = int(type_mask.sum())
+        dropped = int((type_mask & ~finite).sum())
+        nonfinite[score_type] = {
+            'total': total,
+            'score_nonfinite': dropped,
+            'kept': total - dropped,
+            'dropped_rate': dropped / total if total else np.nan,
+        }
+
+    score_df = score_df.loc[finite].copy()
+    scores_real = score_df.loc[score_df.type == 'real', 'score'].to_numpy()
+    scores_gen = (score_df.loc[
+        score_df.type == 'generated', 'score'
+    ].to_numpy(),)
+
     if group_scores:
         groups_real, groups_gen, thresholds = partitioning.group_by_score(
             scores_real, scores_gen,
@@ -106,6 +127,7 @@ def score_data(
         groups_real, groups_gen, thresholds = None, None, 'auto'
 
     score_df = partitioning.get_score_table(scores_real, scores_gen, groups_real, groups_gen)
+    score_df.attrs['nonfinite'] = nonfinite
 
     if return_plot_fn:
         plot_fn = lambda title, ax: plotting.hist(
@@ -144,27 +166,70 @@ def score_data_cond(
         scores_real, scores_gen = partitioning.score_real_gen(loader, scoring_fn_cond)
     else:
         scores_real, scores_gen = score_cache.score_real_gen(scoring_fn_cond)
-    groups_real, groups_gen, thresholds = partitioning.group_by_score(
-        scores_real, scores_gen,
-        return_thresholds=True,
-        **score_cond_kwargs
-    )
-    # print('score_real', scores_real)
-    # print('score_gen', scores_gen)
-    # print('thresholds', thresholds)
 
     # calc scores of interest (to be conditioned on prior scores)
     if score_cache is None:
         eval_real, eval_gen = partitioning.score_real_gen(loader, scoring_fn)
     else:
         eval_real, eval_gen = score_cache.score_real_gen(scoring_fn)
-    score_df = partitioning.get_score_table(eval_real, eval_gen, groups_real, groups_gen)
 
-    score_df_cond = partitioning.get_score_table(scores_real, scores_gen, groups_real, groups_gen)
+    score_df = partitioning.get_score_table(eval_real, eval_gen, None, None)
+    score_df_cond = partitioning.get_score_table(scores_real, scores_gen, None, None)
+    assert score_df.type.equals(score_df_cond.type)
+    score_df = score_df.drop(columns='group')
+    score_df['score_cond'] = score_df_cond.score
+
+    score_values = score_df.score.to_numpy(dtype=float)
+    condition_values = score_df.score_cond.to_numpy(dtype=float)
+    condition_finite = np.isfinite(condition_values)
+    score_finite = np.isfinite(score_values)
+    nonfinite = {}
+    for score_type in ('real', 'generated'):
+        type_mask = score_df.type.to_numpy() == score_type
+        total = int(type_mask.sum())
+        condition_dropped = int((type_mask & ~condition_finite).sum())
+        score_dropped = int(
+            (type_mask & condition_finite & ~score_finite).sum()
+        )
+        nonfinite[score_type] = {
+            'total': total,
+            'condition_nonfinite': condition_dropped,
+            'score_nonfinite': score_dropped,
+            'kept': total - condition_dropped - score_dropped,
+            'dropped_rate': (
+                (condition_dropped + score_dropped) / total if total else np.nan
+            ),
+        }
+
+    score_df = score_df.loc[condition_finite & score_finite].copy()
+    real_scores = score_df.loc[score_df.type == 'real', 'score'].to_numpy()
+    generated_scores = score_df.loc[
+        score_df.type == 'generated', 'score'
+    ].to_numpy()
+    real_conditions = score_df.loc[
+        score_df.type == 'real', 'score_cond'
+    ].to_numpy()
+    generated_conditions = score_df.loc[
+        score_df.type == 'generated', 'score_cond'
+    ].to_numpy()
+    groups_real, groups_gen, thresholds = partitioning.group_by_score(
+        real_conditions,
+        (generated_conditions,),
+        return_thresholds=True,
+        **score_cond_kwargs,
+    )
+    score_df = partitioning.get_score_table(
+        real_scores,
+        (generated_scores,),
+        groups_real,
+        groups_gen,
+    )
+    score_df['score_cond'] = np.concatenate(
+        (real_conditions, generated_conditions)
+    )
 
     # second grouping for each of the first groups (binning the conditional scores):
     score_df['subgroup'] = -1
-    score_df['score_cond'] = score_df_cond.score
     sub_dfs = [df[1] for df in score_df.groupby('group')]
     new_dfs = []
     for df in sub_dfs:
@@ -181,6 +246,7 @@ def score_data_cond(
         df.loc[gen_scores.index, 'subgroup'] = groups_gen
         new_dfs.append(df)
     score_df = pd.concat(new_dfs)
+    score_df.attrs['nonfinite'] = nonfinite
 
     if return_plot_fn:
         plot_fn = lambda var_eval, var_cond, bins, binwidth: plotting.facet_grid_hist(

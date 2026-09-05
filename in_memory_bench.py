@@ -84,7 +84,7 @@ def message_frame_from_raw(raw_messages: object, *, date: str) -> pd.DataFrame:
         + pd.to_timedelta(seconds, unit="s")
         + pd.to_timedelta(nanoseconds, unit="ns")
     )
-    return pd.DataFrame(
+    frame = pd.DataFrame(
         {
             "time": timestamps,
             "event_type": messages[:, 1].astype(np.int32),
@@ -95,6 +95,16 @@ def message_frame_from_raw(raw_messages: object, *, date: str) -> pd.DataFrame:
         },
         columns=MESSAGE_COLUMNS,
     )
+    if messages.shape[1] >= 14:
+        reference_seconds = messages[:, 12].astype(np.int64)
+        reference_nanoseconds = messages[:, 13].astype(np.int64)
+        reference_time = (
+            pd.Timestamp(date)
+            + pd.to_timedelta(reference_seconds, unit="s")
+            + pd.to_timedelta(reference_nanoseconds, unit="ns")
+        )
+        frame["reference_time"] = reference_time.where(reference_seconds >= 0)
+    return frame
 
 
 def book_frame_from_raw(raw_book: object) -> pd.DataFrame:
@@ -229,6 +239,7 @@ def run_payload(
         stock=stock,
         model_name=model_name,
         divergence_horizon=divergence_horizon,
+        scoring_config=run_bench.RAW_REFERENCE_SCORING_CONFIG,
     )
     impact.impact_compare(
         loader,

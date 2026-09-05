@@ -124,6 +124,19 @@ DEFAULT_SCORING_CONFIG = {
 }
 
 
+RAW_REFERENCE_SCORING_CONFIG = {
+    **DEFAULT_SCORING_CONFIG,
+    "log_time_to_cancel_all": {
+        "fn": lambda m, b: np.log(
+            eval.time_to_cancel_all(m)
+            .dt.total_seconds()
+            .replace({0: 1e-9})
+            .values.astype(float)
+        ),
+    },
+}
+
+
 ######################## CONDITIONAL SCORING ########################
 DEFAULT_SCORING_CONFIG_COND = {
     "ask_volume | spread": {
